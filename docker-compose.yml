@@ -1,0 +1,179 @@
+version: '3.8'
+
+services:
+  # -------------------------------------------------------------
+  # 1. APLICAÇÃO SPOTIFY (MICROSSERVIÇOS SIMULADOS + GERADOR DE CARGA)
+  # -------------------------------------------------------------
+  spotify-services:
+    build:
+      context: ./services
+      dockerfile: Dockerfile
+    container_name: spotify-services
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - LOKI_URL=http://loki:3100/loki/api/v1/push
+    depends_on:
+      - otel-collector
+      - redis
+      - loki
+    networks:
+      - spotify-net
+
+  # -------------------------------------------------------------
+  # 2. BANCO DE SESSÕES & CACHE (REDIS)
+  # -------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: spotify-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    networks:
+      - spotify-net
+
+  # -------------------------------------------------------------
+  # 3. OPENTELEMETRY COLLECTOR (RECEBIMENTO & ROTEAMENTO DE TELEMETRIA)
+  # -------------------------------------------------------------
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.98.0
+    container_name: otel-collector
+    restart: unless-stopped
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    ports:
+      - "4317:4317"   # OTLP gRPC receiver
+      - "4318:4318"   # OTLP HTTP receiver
+      - "8889:8889"   # Prometheus metrics exporter
+    depends_on:
+      - tempo
+    networks:
+      - spotify-net
+
+  # -------------------------------------------------------------
+  # 4. GRAFANA TEMPO (DISTRIBUTED TRACING BACKEND)
+  # -------------------------------------------------------------
+  tempo:
+    image: grafana/tempo:2.4.1
+    container_name: tempo
+    restart: unless-stopped
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./tempo/tempo.yaml:/etc/tempo.yaml:ro
+    ports:
+      - "3200:3200"   # Tempo HTTP API
+    networks:
+      - spotify-net
+
+  # -------------------------------------------------------------
+  # 5. GRAFANA LOKI (CENTRALIZAÇÃO DE LOGS JSON & TRACE CORRELATION)
+  # -------------------------------------------------------------
+  loki:
+    image: grafana/loki:3.0.0
+    container_name: loki
+    restart: unless-stopped
+    command: ["-config.file=/etc/loki/local-config.yaml"]
+    volumes:
+      - ./loki/loki-config.yaml:/etc/loki/local-config.yaml:ro
+    ports:
+      - "3100:3100"   # Loki HTTP API
+    networks:
+      - spotify-net
+
+  # -------------------------------------------------------------
+  # 6. PROMETHEUS (TSDB DE MÉTRICAS & ENGINE DE REGRAS DE ALERTA)
+  # -------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: prometheus
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--web.enable-lifecycle"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
+    ports:
+      - "9090:9090"
+    networks:
+      - spotify-net
+
+  # -------------------------------------------------------------
+  # 7. PROMETHEUS ALERTMANAGER (NOTIFICAÇÃO DE ALERTAS - SLACK)
+  # -------------------------------------------------------------
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: alertmanager
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        sed "s|__SLACK_WEBHOOK_URL__|$${SLACK_WEBHOOK_URL:-https://httpbin.org/post}|g" /etc/alertmanager/alertmanager.yml.tpl > /tmp/alertmanager.yml
+        exec /bin/alertmanager --config.file=/tmp/alertmanager.yml --storage.path=/alertmanager
+    environment:
+      - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL:-}
+    volumes:
+      - ./alertmanager/alertmanager.yml.tpl:/etc/alertmanager/alertmanager.yml.tpl:ro
+    ports:
+      - "9093:9093"   # Alertmanager HTTP UI / API
+    networks:
+      - spotify-net
+
+  # -------------------------------------------------------------
+  # 8. NODE EXPORTER (MÉTRICAS REAIS DE INFRAESTRUTURA - FRAMEWORK USE)
+  # -------------------------------------------------------------
+  node-exporter:
+    image: prom/node-exporter:v1.8.1
+    container_name: node-exporter
+    restart: unless-stopped
+    ports:
+      - "9100:9100"
+    networks:
+      - spotify-net
+
+  # -------------------------------------------------------------
+  # 9. REDIS EXPORTER (MÉTRICAS REAIS DO CACHE - FRAMEWORK USE)
+  # -------------------------------------------------------------
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.58.0
+    container_name: redis-exporter
+    restart: unless-stopped
+    environment:
+      - REDIS_ADDR=redis://redis:6379
+    ports:
+      - "9121:9121"
+    networks:
+      - spotify-net
+
+  # -------------------------------------------------------------
+  # 10. GRAFANA (PAINÉIS DE VISUALIZAÇÃO, CORRELAÇÃO & ALERTAS)
+  # -------------------------------------------------------------
+  grafana:
+    image: grafana/grafana:10.4.2
+    container_name: grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+      - loki
+      - tempo
+      - alertmanager
+    networks:
+      - spotify-net
+
+networks:
+  spotify-net:
+    driver: bridge

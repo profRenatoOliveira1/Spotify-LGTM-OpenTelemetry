@@ -1,0 +1,57 @@
+groups:
+  - name: spotify_observability_alerts
+    rules:
+      # ALERTA 1: Latência p99 de início de reprodução acima de 500ms
+      - alert: PlaybackLatencyHigh
+        expr: histogram_quantile(0.99, sum(rate(spotify_playback_initialization_seconds_bucket[5m])) by (le)) > 0.5
+        for: 1m
+        labels:
+          severity: critical
+          service: audio-streaming-service
+        annotations:
+          summary: "Latência p99 de inicialização de áudio acima de 500ms"
+          description: "O percentil p99 do tempo de buffer inicial para os usuários ultrapassou 500ms, degradando a experiência auditiva (SLO violado)."
+
+      # ALERTA 2: Taxa de erro HTTP 5xx no streaming > 2%
+      - alert: StreamingErrorRateHigh
+        expr: (sum(rate(spotify_http_requests_total{service="audio-streaming-service", status=~"5.."}[5m])) / sum(rate(spotify_http_requests_total{service="audio-streaming-service"}[5m]))) * 100 > 2
+        for: 2m
+        labels:
+          severity: critical
+          service: audio-streaming-service
+        annotations:
+          summary: "Taxa de falhas HTTP 5xx no streaming superior a 2%"
+          description: "O serviço de entrega de áudio está retornando erros de servidor internos para mais de 2% das requisições de chunks de mídia."
+
+      # ALERTA 3: Uso de CPU dos microsserviços acima de 85%
+      - alert: MicroserviceCPUHigh
+        expr: spotify_cpu_usage_percentage > 85
+        for: 3m
+        labels:
+          severity: warning
+          tier: backend
+        annotations:
+          summary: "Consumo de CPU em microsserviço acima de 85%"
+          description: "O uso sustentado de CPU do pod ultrapassou 85%, exigindo acionamento de auto-scaling (HPA) preventivo."
+
+      # ALERTA 4: Hit Ratio do Cache Redis abaixo de 90%
+      - alert: RedisCacheMissHigh
+        expr: spotify_cache_hit_ratio < 0.90
+        for: 3m
+        labels:
+          severity: warning
+          component: redis-cache
+        annotations:
+          summary: "Eficácia de cache Redis inferior a 90%"
+          description: "O índice de acerto do cache de metadados caiu abaixo de 90%, sobrecarregando desnecessariamente a fonte de dados principal e elevando a latência de busca."
+
+      # ALERTA 5: Disponibilidade da Autenticação abaixo de 99.9%
+      - alert: AuthServiceUnavailable
+        expr: (sum(rate(spotify_http_requests_total{service="auth-service", status=~"2.."}[5m])) / sum(rate(spotify_http_requests_total{service="auth-service"}[5m]))) < 0.999
+        for: 1m
+        labels:
+          severity: critical
+          service: auth-service
+        annotations:
+          summary: "Disponibilidade do Auth-Service abaixo do SLO (99.9%)"
+          description: "A taxa de sucesso das autenticações JWT caiu abaixo do patamar de 99.9%, impedindo o login dos ouvintes."
